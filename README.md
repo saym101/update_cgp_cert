@@ -38,12 +38,35 @@ chmod +x update_cgp_cert.sh
 ./update_cgp_cert.sh
 ```
 
-### 5. Автоматизация через CRON
-Добавьте в `crontab -e` строку:
+### 5. Автоматический запуск раз в 80 дней через systemd
+Создайте service-файл /etc/systemd/system/update_cgp_cert.service:
 ```bash
-0 3 * * * /path/to/update_cgp_cert.sh >> /var/log/update_cgp_cert_cron.log 2>&1
+[Unit]
+Description=Update CommuniGate Pro SSL Certificates
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/path/to/update_cgp_cert.sh
 ```
-Этот cron-запуск обновит сертификаты каждый день в 3:00 ночи.
+Создайте timer-файл /etc/systemd/system/update_cgp_cert.timer:
+```bash
+[Unit]
+Description=Run update_cgp_cert.sh every 80 days
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=6912000  # 80 дней в секундах
+Unit=update_cgp_cert.service
+
+[Install]
+WantedBy=timers.target
+```
+Активируйте таймер:
+```bash
+systemctl daemon-reload
+systemctl enable --now update_cgp_cert.timer
+```
 
 ## 📜 Логи и отладка
 После выполнения скрипта лог-файл можно найти здесь:
