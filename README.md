@@ -46,7 +46,7 @@ chmod +x update_cgp_cert.sh
 ./update_cgp_cert.sh
 ```
 
-### 5. Автоматический запуск раз в 80 дней через systemd
+### 5. Автоматический запуск раз в 60 дней через systemd
 Создайте service-файл /etc/systemd/system/update_cgp_cert.service:
 ```bash
 [Unit]
@@ -60,7 +60,7 @@ ExecStart=/path/to/update_cgp_cert.sh
 Создайте timer-файл /etc/systemd/system/update_cgp_cert.timer:
 ```bash
 [Unit]
-Description=Run update_cgp_cert.sh every 80 days
+Description=Run update_cgp_cert.sh every 60 days
 
 [Timer]
 OnBootSec=5min
