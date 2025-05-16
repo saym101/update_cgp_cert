@@ -5,9 +5,9 @@ DOMAINS="domain1.ru domain2.ru domain3.ru"  # Список ваших домен
 POSTMASTER_NAME="your_email@domain.ru"      # Ваш email для авторизации (postmaster@domen.ru)
 POSTMASTER_PASSWORD="your_password"         # Ваш пароль postmaster
 NOTIFICATION_EMAIL="recipient_email@domain.ru"  # Email для уведомлений
-IP_CGP_SERVER="your_server_ip"              # IP сервера CommuniGate Pro (скорее всего 127.0.0.1)
-CLI_PORT="your_cli_port"                    # Порт CLI (обычно 8100)
-SMTP_SERVER="your_smtp_server:port"         # SMTP сервер и порт (например, 127.0.0.1:25)
+IP_CGP_SERVER="127.0.0.1"              # IP сервера CommuniGate Pro (скорее всего 127.0.0.1)
+CLI_PORT="8100"                    # Порт CLI (обычно 8100)
+SMTP_SERVER="127.0.0.1:25"         # SMTP сервер и порт (например, 127.0.0.1:25)
 
 # Остальные переменные
 LOG_FILE="/var/log/update_cgp_cert.log"
