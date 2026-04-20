@@ -32,7 +32,7 @@ Settings\Domain\<NameDomain>\Security\SSL/TLS параметр PKI Services ус
 
 ### 1. Копируем скрипт к себе
 ```
- wget https://github.com/saym101/update_cgp_cert/raw/refs/heads/main/update_cgp_cert.sh
+ wget https://raw.githubusercontent.com/saym101/update_cgp_cert/refs/heads/main/update_cgp_cert.sh
 ```
 
 ### 2. Отредактируйте блок настроек в начале файла `update_cgp_cert.sh`:
