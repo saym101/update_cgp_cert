@@ -1,130 +1,178 @@
 #!/bin/bash
 
-# Настраиваемые переменные (замените на свои значения)
-DOMAINS="domain1.ru domain2.ru domain3.ru"  # Список ваших доменов через пробел. Можно оставить только один.
-POSTMASTER_NAME="your_email@domain.ru"      # Ваш email для авторизации (postmaster@domen.ru)
-POSTMASTER_PASSWORD="your_password"         # Ваш пароль postmaster
-NOTIFICATION_EMAIL="recipient_email@domain.ru"  # Email для уведомлений
-IP_CGP_SERVER="127.0.0.1"              # IP сервера CommuniGate Pro (скорее всего 127.0.0.1)
-CLI_PORT="8100"                    # Порт CLI (обычно 8100)
-SMTP_SERVER="127.0.0.1:25"         # SMTP сервер и порт (например, 127.0.0.1:25)
+# ==============================================================================
+# CGP Master SSL - Автоматизация Let's Encrypt для CommuniGate Pro
+# GitHub: https://github.com/ваш_логин/cgp-master-ssl
+# ==============================================================================
 
-# Остальные переменные
-LOG_FILE="/var/log/update_cgp_cert.log"
-SUCCESS_MESSAGES=()
-ERROR_MESSAGES=()
+# --- БЛОК НАСТРОЕК (ЗАПОЛНИТЕ СВОИМИ ДАННЫМИ) ---
+EMAIL_ADMIN="admin@example.com"      # Аккаунт администратора CGP
+EMAIL_REPORT="reports@example.com"   # Куда слать отчеты о работе
+SMTP_PASS="YourSecurePassword"       # Пароль администратора CGP
+IP_CGP="127.0.0.1"                   # IP сервера CommuniGate
+CLI_PORT="8100"                      # Порт CLI CommuniGate (по умолчанию 8100)
+SMTP_PORT="25"                       # Порт SMTP для отправки отчетов
+HELO_HOST="example.com"           # HELO для SMTP сессии
 
-echo "[$(date)]: Начало выполнения скрипта" >> "$LOG_FILE"
+# Настройки скрипта
+CONFIG_ASSISTANT=true
+EXIT_TIMEOUT=60
+LOG_FILE="/scripts/log/cgp_master.log"
+REQUIRED_PACKAGES="certbot curl lsof openssl"
 
-send_notification() {
-    local temp_file="/tmp/cgp_email_$$.txt"
-    local subject="Обновление сертификатов: Итоговый отчёт"
-    local message=""
-    local boundary="----=_Boundary_$(date +%s)"
+# --- РЕДАКТИРУЕМАЯ ТАБЛИЦА СТОП-КОМАНД ---
+# Добавьте сюда службы, которые занимают 80 порт
+declare -A CUSTOM_STOP=( ["apache2"]="systemctl stop apache2" ["nginx"]="systemctl stop nginx" ["caddy"]="systemctl stop caddy" )
+declare -A CUSTOM_START=( ["apache2"]="systemctl start apache2" ["nginx"]="systemctl start nginx" ["caddy"]="systemctl start caddy" )
 
-    # Формируем текст сообщения
-    if [ ${#SUCCESS_MESSAGES[@]} -gt 0 ]; then
-        message+="Успешно обновлены сертификаты:\n"
-        for msg in "${SUCCESS_MESSAGES[@]}"; do
-            message+="- $msg\n"
-        done
-    fi
-    if [ ${#ERROR_MESSAGES[@]} -gt 0 ]; then
-        message+="\nОшибки при обновлении сертификатов:\n"
-        for msg in "${ERROR_MESSAGES[@]}"; do
-            message+="- $msg\n"
-        done
-    fi
-    if [ ${#SUCCESS_MESSAGES[@]} -eq 0 ] && [ ${#ERROR_MESSAGES[@]} -eq 0 ]; then
-        message="Ничего не обработано."
-    fi
+# --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
+REPORT_DATA=()
+mkdir -p "$(dirname "$LOG_FILE")"
 
-    # Создаём письмо с вложением в MIME-формате
-    {
-        echo "From: \"Admin\" <$POSTMASTER_NAME>"
-        echo "To: $NOTIFICATION_EMAIL"
-        echo "Subject: $subject"
-        echo "Date: $(date -R)"
-        echo "Message-ID: <$(date +%s)>"
-        echo "MIME-Version: 1.0"
-        echo "Content-Type: multipart/mixed; boundary=\"$boundary\""
-        echo ""
-        echo "--$boundary"
-        echo "Content-Type: text/plain; charset=utf-8"
-        echo "Content-Transfer-Encoding: 8bit"
-        echo ""
-        echo -e "$message"
-        echo ""
-        echo "--$boundary"
-        echo "Content-Type: application/octet-stream; name=\"update_cgp_cert.log\""
-        echo "Content-Transfer-Encoding: base64"
-        echo "Content-Disposition: attachment; filename=\"update_cgp_cert.log\""
-        echo ""
-        base64 "$LOG_FILE"
-        echo ""
-        echo "--$boundary--"
-    } > "$temp_file"
-
-    # Логируем содержимое письма (без base64-данных для читаемости)
-    echo "[$(date)]: Содержимое отправляемого письма (без вложения):" >> "$LOG_FILE"
-    grep -v "$(base64 "$LOG_FILE" | head -n 1)" "$temp_file" >> "$LOG_FILE"
-
-    # Отправляем письмо
-    curl --url "smtp://$SMTP_SERVER" \
-         --mail-from "$POSTMASTER_NAME" \
-         --mail-rcpt "$NOTIFICATION_EMAIL" \
-         --upload-file "$temp_file" >> "$LOG_FILE" 2>&1
-
-    if [ $? -eq 0 ]; then
-        echo "[$(date)]: Уведомление отправлено на $NOTIFICATION_EMAIL" >> "$LOG_FILE"
-        # Удаляем лог-файл после успешной отправки
-        rm -f "$LOG_FILE"
-        echo "[$(date)]: Лог-файл $LOG_FILE удалён после отправки" > "$LOG_FILE"
-    else
-        echo "[$(date)]: Ошибка отправки уведомления на $NOTIFICATION_EMAIL" >> "$LOG_FILE"
-    fi
-
-    # Удаляем временный файл
-    rm -f "$temp_file"
+log_msg() { 
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+    REPORT_DATA+=("$1")
+    [ -t 0 ] && echo -e "$1"
 }
 
-for DOMAIN_NAME in $DOMAINS; do
-    echo "[$(date)]: Обработка домена $DOMAIN_NAME" >> "$LOG_FILE"
-    CERT_PATH="/etc/letsencrypt/live/mail.$DOMAIN_NAME"
-    LETS_ENCRYPT_KEY="$CERT_PATH/privkey.pem"
-    LETS_ENCRYPT_CRT="$CERT_PATH/cert.pem"
-    LETS_ENCRYPT_CHAIN_CRT="$CERT_PATH/fullchain.pem"
+# --- ФУНКЦИЯ ОТПРАВКИ УВЕДОМЛЕНИЙ ---
+send_notification() {
+    [ -t 0 ] && return 0 
+    
+    local subject="SSL Report: $(hostname) - $(date +%F)"
+    local temp_mail="/tmp/ssl_mail.txt"
+    
+    {
+        echo "To: $EMAIL_REPORT"
+        echo "From: $EMAIL_ADMIN"
+        echo "Subject: $subject"
+        echo "Content-Type: text/html; charset=UTF-8"
+        echo ""
+        echo "<html><body>"
+        echo "<h2>SSL Update Report</h2><hr>"
+        for line in "${REPORT_DATA[@]}"; do
+            if [[ "$line" == *"[OK]"* ]]; then
+                echo "<p style='color:green;'>$line</p>"
+            elif [[ "$line" == *"[FAIL]"* ]] || [[ "$line" == *"[ERROR]"* ]]; then
+                echo "<p style='color:red;'><b>$line</b></p>"
+            else
+                echo "<p>$line</p>"
+            fi
+        done
+        echo "<hr><p>Generated by CGP Master Script: $(date)</p></body></html>"
+    } > "$temp_mail"
 
-    if [ ! -f "$LETS_ENCRYPT_KEY" ] || [ ! -f "$LETS_ENCRYPT_CRT" ] || [ ! -f "$LETS_ENCRYPT_CHAIN_CRT" ]; then
-        echo "[$(date)]: [ERROR]: Файлы сертификата для $DOMAIN_NAME не найдены!" >> "$LOG_FILE"
-        ERROR_MESSAGES+=("Файлы сертификата для $DOMAIN_NAME не найдены.")
-        continue
+    curl --url "smtp://$IP_CGP:$SMTP_PORT" \
+         --mail-from "$EMAIL_ADMIN" \
+         --mail-rcpt "$EMAIL_REPORT" \
+         --upload-file "$temp_mail" \
+         --user "$EMAIL_ADMIN:$SMTP_PASS" \
+         --mail-auth "$EMAIL_ADMIN" \
+         -k --silent --show-error >> "$LOG_FILE" 2>&1
+
+    rm -f "$temp_mail"
+}
+
+# --- ОСНОВНЫЕ ФУНКЦИИ ---
+smart_read() {
+    local timeout=$EXIT_TIMEOUT
+    local char=""
+    echo -e "\n\e[36mWaiting for choice ($timeout sec)...\e[0m" >&2
+    while [ $timeout -gt 0 ]; do
+        if read -t 1 -n 1 char; then echo "$char"; return 0; fi
+        ((timeout--))
+        echo -ne "\r\e[33mTime left: $timeout sec...\e[0m " >&2
+    done
+    echo "TIMEOUT_EXIT"
+}
+
+fetch_domains_from_cgp() {
+    local raw_list
+    raw_list=$(curl -s -u "$EMAIL_ADMIN:$SMTP_PASS" -k "http://$IP_CGP:$CLI_PORT/cli/?command=listdomains")
+    [ $? -ne 0 ] || [ -z "$raw_list" ] && return 1
+    DOMAINS_BASE=$(echo "$raw_list" | sed 's/[^a-zA-Z0-9.-]/ /g' | xargs)
+    return 0
+}
+
+get_port_owner() { lsof -i :80 -sTCP:LISTEN -t | xargs ps -o comm= -p 2>/dev/null | head -n 1 | tr -d ' '; }
+
+task_get_certs() {
+    log_msg ">>> Getting certificates..."
+    fetch_domains_from_cgp || return 1
+    local owner=$(get_port_owner)
+    local services_to_start=()
+    
+    if [ -n "$owner" ]; then
+        if [[ -n "${CUSTOM_STOP[$owner]}" ]]; then
+            log_msg "Stopping $owner..."
+            ${CUSTOM_STOP[$owner]} >> "$LOG_FILE" 2>&1
+            services_to_start+=("$owner")
+        fi
     fi
 
-    echo "[$(date)]: Подготовка ключа для $DOMAIN_NAME" >> "$LOG_FILE"
-    private_secure_key=$(openssl rsa -in "$LETS_ENCRYPT_KEY" -traditional 2> /dev/null | grep -v '\-\-' | tr -d '\n')
-    echo "[$(date)]: Подготовка сертификата для $DOMAIN_NAME" >> "$LOG_FILE"
-    secure_sertificate=$(cat "$LETS_ENCRYPT_CRT" | grep -v '\-\-' | tr -d '\n')
-    echo "[$(date)]: Подготовка цепочки для $DOMAIN_NAME" >> "$LOG_FILE"
-    le_chain_crt=$(cat "$LETS_ENCRYPT_CHAIN_CRT" | grep -v '\-\-' | tr -d '\n')
+    for domain in $DOMAINS_BASE; do
+        if certbot certonly --standalone -d "mail.$domain" --key-type rsa --rsa-key-size 2048 --non-interactive --agree-tos --email "$EMAIL_ADMIN" >> "$LOG_FILE" 2>&1; then
+            log_msg "[OK] mail.$domain cert received"
+        else
+            log_msg "[FAIL] mail.$domain certbot error"
+        fi
+    done
 
-    # Формируем команду для одного запроса
-    COMMAND="command=updatedomainsettings ${DOMAIN_NAME} {PrivateSecureKey=[${private_secure_key}];SecureCertificate=[${secure_sertificate}];CAChain=[${le_chain_crt}];}"
+    for svc in "${services_to_start[@]}"; do
+        ${CUSTOM_START[$svc]} >> "$LOG_FILE" 2>&1
+    done
+}
 
-    # Отправляем всё одним запросом
-    curl -u "$POSTMASTER_NAME:$POSTMASTER_PASSWORD" -k "http://$IP_CGP_SERVER:$CLI_PORT/cli/" \
-         --data-urlencode "$COMMAND" >> "$LOG_FILE" 2>&1
+task_install_to_cgp() {
+    log_msg ">>> Installing to CommuniGate..."
+    fetch_domains_from_cgp || return 1
+    for domain in $DOMAINS_BASE; do
+        local path="/etc/letsencrypt/live/mail.$domain"
+        if [ -d "$path" ]; then
+            key=$(openssl rsa -in "$path/privkey.pem" -traditional 2>/dev/null | grep -v '\-\-' | tr -d '\n\r ')
+            crt=$(cat "$path/cert.pem" | grep -v '\-\-' | tr -d '\n\r ')
+            chain=$(cat "$path/fullchain.pem" | grep -v '\-\-' | tr -d '\n\r ')
+            
+            CMD="command=updatedomainsettings ${domain} {PrivateSecureKey=[${key}];SecureCertificate=[${crt}];CAChain=[${chain}];}"
+            resp=$(curl -s -u "$EMAIL_ADMIN:$SMTP_PASS" -k "http://$IP_CGP:$CLI_PORT/cli/" --data-urlencode "$CMD")
+            
+            if [ $? -eq 0 ] && [[ ! "$resp" =~ "ERROR" ]]; then
+                log_msg "[OK] $domain updated successfully"
+            else
+                log_msg "[FAIL] $domain CLI error ($resp)"
+            fi
+        fi
+    done
+}
 
-    if [ $? -eq 0 ]; then
-        echo "[$(date)]: Сертификаты для $DOMAIN_NAME успешно обновлены" >> "$LOG_FILE"
-        SUCCESS_MESSAGES+=("Сертификат для $DOMAIN_NAME успешно обновлён и применён в CommuniGate Pro.")
-    else
-        echo "[$(date)]: [ERROR]: Не удалось обновить сертификаты для $DOMAIN_NAME" >> "$LOG_FILE"
-        ERROR_MESSAGES+=("Не удалось обновить сертификаты для $DOMAIN_NAME.")
-    fi
-done
+task_cleanup_smart() {
+    log_msg ">>> Cleanup expired certs..."
+    local cert_output=$(certbot certificates 2>/dev/null)
+    local cert_list=$(echo "$cert_output" | grep "Certificate Name" | awk '{print $3}')
+    for cert in $cert_list; do
+        local exp_date=$(echo "$cert_output" | sed -n "/Certificate Name: $cert/,/Expiry Date/p" | grep "Expiry Date" | awk '{print $3}')
+        local exp_sec=$(date -d "$exp_date" +%s 2>/dev/null)
+        if [ -n "$exp_sec" ] && [ "$exp_sec" -lt "$(date +%s)" ]; then
+            log_msg "[EXPIRED] Removing $cert..."
+            certbot delete --non-interactive --cert-name "$cert" >> "$LOG_FILE" 2>&1
+        fi
+    done
+}
 
-# Отправляем итоговое уведомление с вложением лога
-send_notification
-
-echo "[$(date)]: Завершение выполнения скрипта" >> "$LOG_FILE"
+# --- EXECUTION ---
+if [ -t 0 ]; then
+    while true; do
+        echo -e "\n1) FULL CYCLE\n2) Get Certs\n3) Install to CGP\n4) Cleanup\n0) Exit"
+        ch=$(smart_read)
+        case "$ch" in
+            1) task_get_certs; task_install_to_cgp; task_cleanup_smart ;;
+            0) exit 0 ;;
+            TIMEOUT_EXIT) exit 0 ;;
+        esac
+    done
+else
+    task_get_certs
+    task_install_to_cgp
+    task_cleanup_smart
+    send_notification
+fi
