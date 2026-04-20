@@ -1,5 +1,4 @@
 
-```markdown
 # CommuniGate Pro SSL Master
 
 Bash-скрипт для автоматизации получения и установки SSL-сертификатов Let's Encrypt для почтового сервера CommuniGate Pro.
