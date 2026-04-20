@@ -85,5 +85,3 @@ systemctl enable --now update_cgp_cert.timer
 ## Лицензия
 MIT
 ```
-
-📌 Автор: [Александр](https://github.com/saym101) | 🚀 [GitHub Repo](https://github.com/saym101/update_cgp_cert)
