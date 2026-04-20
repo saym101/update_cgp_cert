@@ -2,7 +2,7 @@
 
 # ==============================================================================
 # CGP Master SSL - Автоматизация Let's Encrypt для CommuniGate Pro
-# GitHub: https://github.com/ваш_логин/cgp-master-ssl
+# GitHub: https://raw.githubusercontent.com/saym101/update_cgp_cert/refs/heads/main/update_cgp_cert.sh
 # ==============================================================================
 
 # --- БЛОК НАСТРОЕК (ЗАПОЛНИТЕ СВОИМИ ДАННЫМИ) ---
@@ -17,7 +17,7 @@ HELO_HOST="example.com"           # HELO для SMTP сессии
 # Настройки скрипта
 CONFIG_ASSISTANT=true
 EXIT_TIMEOUT=60
-LOG_FILE="/var/log/cgp_master.log"
+LOG_FILE="/var/log/update_cgp_cert.log"
 REQUIRED_PACKAGES="certbot curl lsof openssl"
 
 # --- РЕДАКТИРУЕМАЯ ТАБЛИЦА СТОП-КОМАНД ---
