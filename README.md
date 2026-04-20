@@ -29,6 +29,8 @@ Settings\Srvices\HTTPU прокрутить ниже до **Доп. проток
 Включить PKI Services
 Settings\Domain\<NameDomain>\Security\SSL/TLS параметр PKI Services установить в Enabled.
 
+Убедитесь, что **`postmaster` имеет доступ к API CommuniGate Pro**.
+
 
 ### 1. Копируем скрипт к себе
 ```
@@ -47,7 +49,7 @@ Settings\Domain\<NameDomain>\Security\SSL/TLS параметр PKI Services ус
 
 ## Настройка автоматизации (systemd)
 
-Для автоматического обновления сертификатов каждые 30 дней создайте service и timer:
+Для автоматического обновления сертификатов каждый день создайте service и timer:
 
 **1. /etc/systemd/system/update_cgp_cert.service**
 ```ini
@@ -58,6 +60,11 @@ After=network.target
 [Service]
 Type=oneshot
 ExecStart=/путь/к/скрипту/update_cgp_cert.sh
+# Рекомендуется добавить пользователя, от которого запускать (обычно root для работы с certbot)
+User=root
+
+[Install]
+WantedBy=multi-user.target
 ```
 
 **2. /etc/systemd/system/update_cgp_cert.timer**
@@ -66,12 +73,21 @@ ExecStart=/путь/к/скрипту/update_cgp_cert.sh
 Description=Run update_cgp_cert every day
 
 [Timer]
+# Запускать ровно в 03:00 ночи каждые сутки
 OnCalendar=*-*-* 03:00:00
+# Если сервер был выключен в 03:00, запустить сразу при загрузке (через 1-2 минуты)
 Persistent=true
+# Указываем, какой сервис запускать
 Unit=update_cgp_cert.service
 
 [Install]
 WantedBy=timers.target
+```
+Скопируй файлы в системную папку (если еще не там):
+
+```Bash
+cp /путь/к/скрипту/update_cgp_cert.service /etc/systemd/system/
+cp /путь/к/скрипту/update_cgp_cert.timer /etc/systemd/system/
 ```
 
 Активируйте таймер:
@@ -79,9 +95,28 @@ WantedBy=timers.target
 systemctl daemon-reload
 systemctl enable --now update_cgp_cert.timer
 ```
-## 🔒 Безопасность
-- **Не храните пароль в коде!** Лучше использовать переменные окружения или хранить пароль в защищённом файле.
-- Убедитесь, что **`postmaster` имеет доступ к API CommuniGate Pro**.
+
+Включи и запусти таймер:
+
+```Bash
+systemctl enable update_cgp_cert.timer
+systemctl start update_cgp_cert.timer
+```
+
+Проверь, что таймер «встал на учет»:
+
+```Bash
+systemctl list-timers --all | grep update_cgp_cert
+```
+
+В выводе ты увидишь: NEXT (через сколько запуск) и LAST (когда был последний).
+
+Тестовый запуск самого сервиса (чтобы проверить, что он не выдает ошибок):
+
+```Bash
+systemctl start update_cgp_cert.service
+```
+После этого загляни в лог: journalctl -u update_cgp_cert.service
 
 ## Лицензия
 MIT
