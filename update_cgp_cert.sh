@@ -17,7 +17,7 @@ HELO_HOST="example.com"           # HELO для SMTP сессии
 # Настройки скрипта
 CONFIG_ASSISTANT=true
 EXIT_TIMEOUT=60
-LOG_FILE="/scripts/log/cgp_master.log"
+LOG_FILE="/var/log/cgp_master.log"
 REQUIRED_PACKAGES="certbot curl lsof openssl"
 
 # --- РЕДАКТИРУЕМАЯ ТАБЛИЦА СТОП-КОМАНД ---
