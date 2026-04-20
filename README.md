@@ -2,6 +2,7 @@
 # CommuniGate Pro SSL Master
 
 Bash-скрипт для автоматизации получения и установки SSL-сертификатов Let's Encrypt для почтового сервера CommuniGate Pro.
+Bash script for automating the receipt and installation of Let's Encrypt SSL certificates for the CommuniGate Pro mail server.
 
 ## Возможности
 * **Автоматическое обнаружение доменов**: Скрипт запрашивает список доменов напрямую у CGP через CLI.
