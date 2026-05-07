@@ -1,5 +1,5 @@
 #!/bin/bash
-set -x
+# set -x
 # --- БЛОК НАСТРОЕК ---
 EMAIL_ADMIN="admin@example.com"      # Аккаунт администратора CGP
 EMAIL_REPORT="reports@example.com"   # Куда слать отчеты о работе
@@ -12,6 +12,8 @@ HELO_HOST="example.com"           # HELO для SMTP сессии
 LOG_FILE="/var/log/cgp_master.log"
 REQUIRED_PACKAGES="certbot curl lsof openssl"
 
+# Список доменов для ИСКЛЮЧЕНИЯ из синхронизации с CGP (через пробел)
+EXCLUDE_DOMAINS_SYNC="glavproekt.com"
 
 # --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
 REPORT_DATA=()
@@ -20,7 +22,21 @@ mkdir -p "$(dirname "$LOG_FILE")"
 log_msg() { 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
     REPORT_DATA+=("$1")
-    [ -t 0 ] && echo -e "$1"
+    
+    # Если запущены в терминале, выводим с цветом
+    if [ -t 0 ]; then
+        if [[ "$1" == *"[SKIP]"* ]]; then
+            echo -e "\e[1;31m$1\e[0m" # Жирный красный для SKIP
+        elif [[ "$1" == *"[OK]"* ]] || [[ "$1" == *"[NEW]"* ]]; then
+            echo -e "\e[32m$1\e[0m"   # Зеленый для успеха
+        elif [[ "$1" == *"[FAIL]"* ]] || [[ "$1" == *"[ERROR]"* ]] || [[ "$1" == *"[CRITICAL]"* ]]; then
+            echo -e "\e[31m$1\e[0m"   # Обычный красный для ошибок
+        elif [[ "$1" == *"[INFO]"* ]]; then
+            echo -e "\e[34m$1\e[0m"   # Синий для инфо
+        else
+            echo -e "$1"
+        fi
+    fi
 }
 
 # --- ПРОВЕРКА ЗАВИСИМОСТЕЙ ---
@@ -31,10 +47,8 @@ check_dependencies() {
             missing+=("$pkg")
         fi
     done
-
     if [ ${#missing[@]} -ne 0 ]; then
         echo -e "\e[31m[ERROR] Отсутствуют необходимые пакеты: ${missing[*]}\e[0m"
-        echo "Установите их: apt update && apt install ${missing[*]} -y (или snap install certbot)"
         exit 1
     fi
 }
@@ -57,12 +71,12 @@ send_notification() {
             if [[ "$line" == *"[NEW]"* ]] || [[ "$line" == *"[OK]"* ]]; then echo "<p style='color:green;'>$line</p>"
             elif [[ "$line" == *"[CRITICAL]"* ]] || [[ "$line" == *"[FAIL]"* ]] || [[ "$line" == *"[ERROR]"* ]]; then echo "<p style='color:red;'><b>$line</b></p>"
             elif [[ "$line" == *"[INFO]"* ]]; then echo "<p style='color:blue;'>$line</p>"
+            elif [[ "$line" == *"[SKIP]"* ]]; then echo "<p style='color:orange;'>$line</p>"
             else echo "<p>$line</p>"
             fi
         done
         echo "<hr><p>Дата запуска: $(date)</p></body></html>"
     } > "$temp_mail"
-    
     curl --url "smtp://$IP_CGP:$SMTP_PORT" --mail-from "$EMAIL_ADMIN" --mail-rcpt "$EMAIL_REPORT" \
          --upload-file "$temp_mail" --user "$EMAIL_ADMIN:$SMTP_PASS" --mail-auth "$EMAIL_ADMIN" \
          -k --silent --show-error >> "$LOG_FILE" 2>&1
@@ -87,7 +101,6 @@ task_get_certs() {
     local owner
     owner=$(get_port_owner)
     local services_to_start=()
-    
     if [ -n "$owner" ]; then
         declare -A CUSTOM_STOP=( ["apache2"]="systemctl stop apache2" ["nginx"]="systemctl stop nginx" ["caddy"]="systemctl stop caddy" )
         if [[ -n "${CUSTOM_STOP[$owner]}" ]]; then
@@ -96,23 +109,17 @@ task_get_certs() {
             services_to_start+=("$owner")
         fi
     fi
-
     for domain in $DOMAINS_BASE; do
         local cb_out
         cb_out="/tmp/cb_$(date +%s).log"
-        # Запрос сертификата. Если лимиты исчерпаны, добавьте сюда доп. домен как обсуждали
         if certbot certonly --standalone -d "mail.$domain" --key-type rsa --rsa-key-size 2048 --non-interactive --agree-tos --email "$EMAIL_ADMIN" > "$cb_out" 2>&1; then
-            if grep -qE "Certificate not yet due for renewal|Your certificate stays valid" "$cb_out"; then 
-                log_msg "[INFO] mail.$domain: Файл еще свежий."
-            else 
-                log_msg "[NEW] mail.$domain: ПОЛУЧЕН НОВЫЙ сертификат!"
+            if grep -qE "Certificate not yet due for renewal|Your certificate stays valid" "$cb_out"; then log_msg "[INFO] mail.$domain: Файл свежий."
+            else log_msg "[NEW] mail.$domain: ПОЛУЧЕН НОВЫЙ сертификат!"
             fi
-        else 
-            log_msg "[FAIL] mail.$domain: ОШИБКА Certbot! (Проверьте логи или лимиты)"
+        else log_msg "[FAIL] mail.$domain: ОШИБКА Certbot!"
         fi
         rm -f "$cb_out"
     done
-
     for svc in "${services_to_start[@]}"; do systemctl start "$svc"; done
 }
 
@@ -120,31 +127,31 @@ task_install_to_cgp() {
     log_msg ">>> 2. Синхронизация с CommuniGate Pro..."
     fetch_domains_from_cgp || return 1
     for domain in $DOMAINS_BASE; do
-        local path
-        # Поиск актуальной папки (берем последнюю по алфавиту, чтобы избежать проблем с -0001)
-        # shellcheck disable=SC2012
-        path=$(ls -d /etc/letsencrypt/live/mail."$domain"* 2>/dev/null | tail -n 1)
-        
-        if [ -z "$path" ] || [ ! -d "$path" ]; then
-            log_msg "[CRITICAL] $domain: Папка сертификата не найдена."
+        # ПРОВЕРКА ИСКЛЮЧЕНИЙ
+        if [[ " $EXCLUDE_DOMAINS_SYNC " =~ " $domain " ]]; then
+            log_msg "[SKIP] $domain: Пропуск синхронизации (в списке исключений)."
             continue
         fi
 
+        local path
+        # shellcheck disable=SC2012
+        path=$(ls -d /etc/letsencrypt/live/mail."$domain"* 2>/dev/null | tail -n 1)
+        if [ -z "$path" ] || [ ! -d "$path" ]; then
+            log_msg "[CRITICAL] $domain: Папка не найдена."
+            continue
+        fi
         local key crt chain CMD resp
         key=$(openssl rsa -in "$path/privkey.pem" -traditional 2>/dev/null | grep -v '\-\-' | tr -d '\n\r ')
         crt=$(cat "$path/cert.pem" 2>/dev/null | grep -v '\-\-' | tr -d '\n\r ')
         chain=$(cat "$path/fullchain.pem" 2>/dev/null | grep -v '\-\-' | tr -d '\n\r ')
-
         if [ -z "$key" ] || [ -z "$crt" ]; then
-            log_msg "[CRITICAL] $domain: Ошибка чтения файлов в $path."
+            log_msg "[CRITICAL] $domain: Файлы в $path пустые."
             continue
         fi
-
         CMD="command=updatedomainsettings ${domain} {PrivateSecureKey=[${key}];SecureCertificate=[${crt}];CAChain=[${chain}];}"
         if resp=$(curl -s -u "$EMAIL_ADMIN:$SMTP_PASS" -k "http://$IP_CGP:$CLI_PORT/cli/" --data-urlencode "$CMD") && [[ ! "$resp" =~ "ERROR" ]]; then 
             log_msg "[OK] $domain: Успешно синхронизирован."
-        else 
-            log_msg "[ERROR] $domain: Ошибка CGP: $resp"
+        else log_msg "[ERROR] $domain: Ошибка CGP: $resp"
         fi
     done
 }
@@ -159,7 +166,7 @@ task_cleanup_manual() {
     case "$clean_ch" in
         1)
             certbot certificates
-            read -r -p "Имя сертификата для удаления: " cert_to_del
+            read -r -p "Имя для удаления: " cert_to_del
             [ -n "$cert_to_del" ] && certbot delete --cert-name "$cert_to_del"
             ;;
         2)
@@ -187,16 +194,22 @@ task_cleanup_manual() {
 
 task_show_status() {
     log_msg ">>> 3. Статус сертификатов:"
-    local cert_output
-    cert_output=$(certbot certificates 2>/dev/null)
-    echo "$cert_output" | grep -E "Certificate Name:|Expiry Date:" | sed 's/Expiry Date:/Истекает:/g' | awk '{$1=$1;print}' | while read -r line; do
-        log_msg "   $line"
-    done
+    # Собираем данные во временную переменную
+    local status_info
+    status_info=$(certbot certificates 2>/dev/null | grep -E "Certificate Name:|Expiry Date:" | sed 's/Expiry Date:/Истекает:/g' | awk '{$1=$1;print}')
+    
+    if [ -n "$status_info" ]; then
+        # Читаем построчно и отправляем в log_msg
+        while read -r line; do
+            log_msg "   $line"
+        done <<< "$status_info"
+    else
+        log_msg "   Сертификаты не найдены."
+    fi
 }
 
 # --- ЗАПУСК ---
 check_dependencies
-
 if [ -t 0 ]; then
     while true; do
         echo -e "\n1) ПОЛНЫЙ ЦИКЛ\n2) Получить (Certbot)\n3) Установить (Sync CGP)\n4) Срок действия\n5) ОЧИСТКА\n0) Выход"
@@ -211,9 +224,5 @@ if [ -t 0 ]; then
         esac
     done
 else
-    # Автоматический режим (для Systemd/Cron)
-    task_get_certs
-    task_install_to_cgp
-    task_show_status
-    send_notification
+    task_get_certs; task_install_to_cgp; task_show_status; send_notification
 fi
