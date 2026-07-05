@@ -7,13 +7,9 @@ SMTP_PASS="YourSecurePassword"       # Пароль администратора
 IP_CGP="127.0.0.1"                   # IP сервера CommuniGate
 CLI_PORT="8100"                      # Порт CLI CommuniGate (по умолчанию 8100)
 SMTP_PORT="25"                       # Порт SMTP для отправки отчетов
-HELO_HOST="example.com"           # HELO для SMTP сессии
 LOG_FILE="/var/log/cgp_master/cgp_master.log"    # Место хранения лог файла
 LOG_RETENTION_DAYS=14    # Срок ротации логов
 REQUIRED_PACKAGES="certbot curl lsof openssl python3" 
-
-LOG_FILE="/var/log/cgp_master.log"
-REQUIRED_PACKAGES="certbot curl lsof openssl"
 
 # Список доменов для ИСКЛЮЧЕНИЯ из синхронизации с CGP (через пробел)
 EXCLUDE_DOMAINS_SYNC="exhample"
@@ -21,6 +17,19 @@ EXCLUDE_DOMAINS_SYNC="exhample"
 # --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
 REPORT_DATA=()
 mkdir -p "$(dirname "$LOG_FILE")"
+
+# --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
+REPORT_DATA=()
+mkdir -p "$(dirname "$LOG_FILE")"
+
+# Фиксируем "интерактивный ли терминал" ОДИН РАЗ при старте.
+# [ -t 0 ] внутри log_msg() нельзя перепроверять на лету: в паре мест вывод
+# команды скармливается в `while read <<<` / `cmd | while read`, а это
+# подменяет stdin (fd0) только для тела цикла — [ -t 0 ] там видит канал
+# данных вместо реального терминала и молча решает не печатать на экран
+# (при этом запись в лог-файл всё равно происходит, отсюда "пустой вывод").
+IS_TTY=0
+[ -t 0 ] && IS_TTY=1
 
 # --- РОТАЦИЯ ЛОГОВ (хранить 14 дней) ---
 rotate_log() {
@@ -44,12 +53,34 @@ print(".".join(p.encode("idna").decode("ascii") for p in parts))
 ' "$domain" 2>/dev/null || printf '%s\n' "$domain"
 }
 
-log_msg() { 
+# --- СКЛЕЙКА НЕСКОЛЬКИХ СЕРТИФИКАТОВ ИЗ PEM В ОДИН BASE64-БЛОБ ДЛЯ CGP ---
+# CGP (CLI updatedomainsettings) хранит поля как ЧИСТЫЙ base64 без PEM-разметки.
+# Если просто вырезать "-----BEGIN/END-----" и склеить текстовые base64-тела
+# нескольких сертификатов подряд (как раньше), выравнивающий "=" первого
+# сертификата попадает в середину строки, и CGP обрезает значение по нему —
+# доезжает только первый (лишний intermediate/кросс-подпись пропадает).
+# Правильный способ — декодировать каждый сертификат в бинарный DER, склеить
+# сами DER-байты (они самоописывающиеся по длине, склейка валидна), и уже
+# ОДИН раз закодировать результат в base64.
+pem_chain_to_der_b64() {
+    local pem_file="$1"
+    python3 -c '
+import sys, base64, re
+data = open(sys.argv[1]).read()
+ders = b"".join(
+    base64.b64decode(re.sub(r"\s+", "", m.group(1)))
+    for m in re.finditer(r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", data, re.S)
+)
+print(base64.b64encode(ders).decode())
+' "$pem_file" 2>/dev/null
+}
+
+log_msg() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
     REPORT_DATA+=("$1")
     
     # Если запущены в терминале, выводим с цветом
-    if [ -t 0 ]; then
+    if [ "$IS_TTY" = "1" ]; then
         if [[ "$1" == *"[SKIP]"* ]]; then
             echo -e "\e[1;31m$1\e[0m" # Жирный красный для SKIP
         elif [[ "$1" == *"[OK]"* ]] || [[ "$1" == *"[NEW]"* ]]; then
@@ -197,7 +228,7 @@ task_install_to_cgp() {
     fetch_domains_from_cgp || return 1
     for domain in $DOMAINS_BASE; do
         # ПРОВЕРКА ИСКЛЮЧЕНИЙ
-        if [[ " $EXCLUDE_DOMAINS_SYNC " =~ " $domain " ]]; then
+        if [[ " $EXCLUDE_DOMAINS_SYNC " == *" $domain "* ]]; then
             log_msg "[SKIP] $domain: Пропуск синхронизации (в списке исключений)."
             continue
         fi
@@ -212,8 +243,12 @@ task_install_to_cgp() {
             continue
         fi
         key=$(openssl rsa -in "$path/privkey.pem" -traditional 2>/dev/null | grep -v '\-\-' | tr -d '\n\r ')
-        crt=$(cat "$path/cert.pem"        2>/dev/null | grep -v '\-\-' | tr -d '\n\r ')
-        chain=$(cat "$path/fullchain.pem" 2>/dev/null | grep -v '\-\-' | tr -d '\n\r ')
+        crt=$(cat "$path/cert.pem"  2>/dev/null | grep -v '\-\-' | tr -d '\n\r ')
+        # ВАЖНО: chain.pem (промежуточные CA, может быть несколько блоков —
+        # напр. кросс-подпись нового корня Let's Encrypt старым), склеенные
+        # через pem_chain_to_der_b64 (см. выше) — не fullchain.pem и не
+        # текстовая склейка, иначе CGP получает только первый сертификат.
+        chain=$(pem_chain_to_der_b64 "$path/chain.pem")
         if [ -z "$key" ] || [ -z "$crt" ]; then
             log_msg "[CRITICAL] $domain: Файлы в $path пустые."
             continue
@@ -284,7 +319,7 @@ task_show_status() {
 # --- ЗАПУСК ---
 check_dependencies
 rotate_log
-if [ -t 0 ]; then
+if [ "$IS_TTY" = "1" ]; then
     while true; do
         echo -e "\n1) ПОЛНЫЙ ЦИКЛ\n2) Получить (Certbot)\n3) Установить (Sync CGP)\n4) Срок действия\n5) ОЧИСТКА\n0) Выход"
         read -r -p "Выберите пункт: " ch
